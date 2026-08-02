@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Stage Mix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+<div class="status-bar">
+  <span class="status-bar__brand">Stage Mix</span>
+  <span class="status-bar__status">
+    <span class="dot" id="mixerDot"></span>
+    <span id="mixerStatusText">Connecting to console&hellip;</span>
+  </span>
+  <span class="status-bar__spacer" aria-hidden="true"></span>
+</div>
+
+<div class="disconnect-banner hidden" id="disconnectBanner">
+  &#9888; Mixer is offline right now — fader and mute changes won't reach the console until it reconnects.
+</div>
+
+<!-- LANDING -->
+<section class="view" id="view-landing">
+  <div class="stage-brand">
+    <div class="stage-brand__eyebrow">GPIB BUKIT ZAITUN MAKASSAR</div>
+    <h1 class="stage-brand__title">STAGE <span>MIX</span></h1>
+    <p class="stage-brand__sub">For Yamaha TF Mixer</p>
+  </div>
+  <div class="landing-actions">
+    <button class="tile tile--user" data-nav="user-name">
+      <span class="tile__label">Masuk</span>
+    </button>
+  </div>
+  <button class="admin-link" data-nav="admin-login">Sound desk / Admin</button>
+</section>
+
+<!-- USER: NAME -->
+<section class="view hidden" id="view-user-name">
+  <button class="back" data-nav="landing">&larr;</button>
+  <h2 class="view-title">Masukan Nama</h2>
+  <p class="view-sub">Tell us who's plugging in.</p>
+  <form id="formName" class="stack">
+    <input class="field" type="text" id="inputName" placeholder="Your name" autocomplete="off" required maxlength="40" />
+    <button class="btn btn--primary" type="submit">Continue</button>
+  </form>
+</section>
+
+<!-- USER: SELECT AUX -->
+<section class="view hidden" id="view-user-mix">
+  <button class="back" data-nav="user-name">&larr;</button>
+  <h2 class="view-title">Select Aux Channel</h2>
+  <p class="view-sub" id="mixSubtitle">Which mix is yours?</p>
+  <div class="stack" id="mixList"></div>
+</section>
+
+<!-- USER: FADER CONTROL -->
+<section class="view hidden" id="view-user-fader">
+  <div class="fader-header">
+    <div>
+      <div class="eyebrow" id="faderMixName">Aux 1</div>
+      <div class="fader-header__name" id="faderUserName">&nbsp;</div>
+    </div>
+    <div class="fader-header__actions">
+      <button class="btn btn--ghost btn--sm" data-nav="user-mix">Switch mix</button>
+      <button class="btn btn--ghost btn--sm" id="btnUserLogout">Log out</button>
+    </div>
+  </div>
+  <div class="fader-rack" id="faderRack"></div>
+</section>
+
+<!-- ADMIN: LOGIN -->
+<section class="view hidden" id="view-admin-login">
+  <button class="back" data-nav="landing">&larr;</button>
+  <h2 class="view-title">Admiin</h2>
+  <p class="view-sub">Console access for the sound desk.</p>
+  <form id="formAdminLogin" class="stack">
+    <input class="field" type="password" id="inputAdminPassword" placeholder="Admin password" required />
+    <button class="btn btn--primary" type="submit">Unlock</button>
+  </form>
+  <p class="error hidden" id="adminLoginError"></p>
+</section>
+
+<!-- ADMIN: DASHBOARD -->
+<section class="view hidden" id="view-admin-dash">
+  <div class="fader-header">
+    <h2 class="view-title" style="margin:0">Sound Desk</h2>
+    <button class="btn btn--ghost btn--sm" id="btnAdminLogout">Log out</button>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="mixes">Aux Mixes</button>
+    <button class="tab" data-tab="users">Active Users</button>
+    <button class="tab" data-tab="channels">Channels</button>
+    <button class="tab" data-tab="mixer">Mixer Link</button>
+    <button class="tab" data-tab="share">Share</button>
+    <button class="tab" data-tab="console">Raw Console</button>
+  </div>
+
+  <div class="tabpane active" id="pane-mixes">
+    <p class="pane-hint">Choose which of the console's 16 aux sends band members can see and pick from. Use "Channels" on each row to limit which input channels show up inside that mix.</p>
+    <button class="btn btn--secondary btn--sm" id="btnSyncNames">Pull names from console</button>
+    <div id="mixesTable" style="margin-top:14px"></div>
+  </div>
+
+  <div class="tabpane" id="pane-users">
+    <p class="pane-hint">Everyone currently connected. Remove a connection by name.</p>
+    <form id="formRemoveByName" class="inline-form">
+      <input class="field" type="text" id="inputRemoveName" placeholder="Name to remove" />
+      <button class="btn btn--danger" type="submit">Remove</button>
+    </form>
+    <div id="usersTable"></div>
+  </div>
+
+  <div class="tabpane" id="pane-channels">
+    <p class="pane-hint">Rename input channels (as they'll appear on stage), set how many are in use, or use "Pull names from console" on the Aux Mixes tab to grab the names already set on the desk.</p>
+    <p class="pane-hint"><strong>Channel count matters</strong> — this only pulls/shows names for channels you've told it exist. TF1/TF-Rack = 16, TF3 = 24, TF5 = 32. If your console has more channels than the count below, bump it up first, then pull names again.</p>
+    <div class="inline-form">
+      <label class="pane-hint" for="inputChannelCount">Channel count</label>
+      <input class="field field--sm" type="number" id="inputChannelCount" min="1" max="64" />
+      <button class="btn btn--secondary" id="btnSaveChannelCount">Update</button>
+    </div>
+    <div id="channelsTable"></div>
+  </div>
+
+  <div class="tabpane" id="pane-mixer">
+    <p class="pane-hint">Point this app at your TF console (Setup &gt; Network &gt; enable RCP, port 49280).</p>
+
+    <div class="status-readout" id="mixerStatusReadout">
+      <span class="dot" id="adminMixerDot"></span>
+      <span id="adminMixerStatusText">Checking connection&hellip;</span>
+    </div>
+
+    <form id="formMixer" class="stack">
+      <label class="label">Mode</label>
+      <select class="field" id="selMixerMode">
+        <option value="mock">Simulated (no hardware needed, for testing)</option>
+        <option value="real">Real TF console</option>
+      </select>
+      <label class="label">Console IP address</label>
+      <input class="field" type="text" id="inputMixerHost" placeholder="192.168.1.50" />
+      <label class="label">Port</label>
+      <input class="field" type="number" id="inputMixerPort" placeholder="49280" />
+      <div class="grid2">
+        <div>
+          <label class="label">Fader min (dB)</label>
+          <input class="field" type="number" id="inputFaderMin" />
+        </div>
+        <div>
+          <label class="label">Fader max (dB)</label>
+          <input class="field" type="number" id="inputFaderMax" />
+        </div>
+      </div>
+      <div class="inline-form" style="margin:0">
+        <button class="btn btn--primary" type="submit">Connect</button>
+        <button class="btn btn--secondary" type="button" id="btnReconnect">Retry connection</button>
+      </div>
+    </form>
+    <hr class="rule" />
+    <p class="label">Change admin password</p>
+    <form id="formPassword" class="inline-form">
+      <input class="field" type="password" id="inputNewPassword" placeholder="New password" />
+      <button class="btn btn--secondary" type="submit">Update</button>
+    </form>
+  </div>
+
+  <div class="tabpane" id="pane-share">
+    <p class="pane-hint">Give this address to band members — they open it in any phone browser (no app install), tap "Masuk", and it'll take them straight to picking their mix. Everyone must be on the same Wi-Fi network as this computer.</p>
+    <div class="inline-form">
+      <input class="field" type="text" id="shareUrl" readonly />
+      <button class="btn btn--secondary" id="btnCopyShareUrl">Copy</button>
+    </div>
+    <p class="pane-hint" id="shareUrlHint"></p>
+  </div>
+
+  <div class="tabpane" id="pane-console">
+    <p class="pane-hint">Send a raw RCP command straight to the console to confirm exact syntax/values against your hardware (see README).</p>
+    <form id="formRaw" class="inline-form">
+      <input class="field" type="text" id="inputRawCommand" placeholder='get MIXER:Current/InCh/ToMix/Level 0 0' />
+      <button class="btn btn--secondary" type="submit">Send</button>
+    </form>
+    <pre id="rawOutput" class="console-out"></pre>
+  </div>
+</section>
+
+<div class="toast hidden" id="toast"></div>
+<div class="masthead-footer">Made By Frits Kayadoe</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
