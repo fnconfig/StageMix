@@ -11,7 +11,7 @@
 </head>
 <body>
 
-<div class="status-bar">
+<div class="status-bar status-bar--hidden" id="statusBar">
   <span class="status-bar__brand">Stage Mix</span>
   <span class="status-bar__status">
     <span class="dot" id="mixerDot"></span>
@@ -25,18 +25,20 @@
 </div>
 
 <!-- LANDING -->
-<section class="view" id="view-landing">
-  <div class="stage-brand">
-    <div class="stage-brand__eyebrow">GPIB BUKIT ZAITUN MAKASSAR</div>
-    <h1 class="stage-brand__title">STAGE <span>MIX</span></h1>
-    <p class="stage-brand__sub">For Yamaha TF Mixer</p>
+<section class="view landing" id="view-landing">
+  <div class="landing__scale" style="background-image:url('/cover-default.jpg')"></div>
+  <div class="landing__panel">
+    <div class="landing__brand">
+      <h1 class="landing__title">STAGE <span>MIX</span></h1>
+      <p class="landing__sub">For Yamaha TF Mixer</p>
+    </div>
+    <div class="landing__actions">
+      <button class="tile tile--user" data-nav="user-name">
+        <span class="tile__label">Masuk</span>
+      </button>
+      <button class="admin-link" data-nav="admin-login">Sound desk / Admin</button>
+    </div>
   </div>
-  <div class="landing-actions">
-    <button class="tile tile--user" data-nav="user-name">
-      <span class="tile__label">Masuk</span>
-    </button>
-  </div>
-  <button class="admin-link" data-nav="admin-login">Sound desk / Admin</button>
 </section>
 
 <!-- USER: NAME -->
@@ -52,7 +54,7 @@
 
 <!-- USER: SELECT AUX -->
 <section class="view hidden" id="view-user-mix">
-  <button class="back" data-nav="user-name">&larr;</button>
+  <button class="back" data-nav="user-mix-back">&larr;</button>
   <h2 class="view-title">Select Aux Channel</h2>
   <p class="view-sub" id="mixSubtitle">Which mix is yours?</p>
   <div class="stack" id="mixList"></div>
@@ -69,8 +71,10 @@
       <button class="btn btn--ghost btn--sm" data-nav="user-mix">Switch mix</button>
       <button class="btn btn--ghost btn--sm" id="btnUserLogout">Log out</button>
     </div>
+  <div class="fader-container">
+    <div class="fader-rack" id="faderRack"></div>
+    <div class="fader-pinned-master" id="faderPinnedMaster"></div>
   </div>
-  <div class="fader-rack" id="faderRack"></div>
 </section>
 
 <!-- ADMIN: LOGIN -->
@@ -79,7 +83,8 @@
   <h2 class="view-title">Admiin</h2>
   <p class="view-sub">Console access for the sound desk.</p>
   <form id="formAdminLogin" class="stack">
-    <input class="field" type="password" id="inputAdminPassword" placeholder="Admin password" required />
+    <input class="field" type="text" id="inputAdminUsername" placeholder="Username" autocomplete="username" required maxlength="40" />
+    <input class="field" type="password" id="inputAdminPassword" placeholder="Password" autocomplete="current-password" required />
     <button class="btn btn--primary" type="submit">Unlock</button>
   </form>
   <p class="error hidden" id="adminLoginError"></p>
@@ -88,7 +93,10 @@
 <!-- ADMIN: DASHBOARD -->
 <section class="view hidden" id="view-admin-dash">
   <div class="fader-header">
-    <h2 class="view-title" style="margin:0">Sound Desk</h2>
+    <div>
+      <h2 class="view-title" style="margin:0">Sound Desk</h2>
+      <span class="pane-hint" id="adminSignedInAs" style="margin:0"></span>
+    </div>
     <button class="btn btn--ghost btn--sm" id="btnAdminLogout">Log out</button>
   </div>
 
@@ -97,6 +105,7 @@
     <button class="tab" data-tab="users">Active Users</button>
     <button class="tab" data-tab="channels">Channels</button>
     <button class="tab" data-tab="mixer">Mixer Link</button>
+    <button class="tab" data-tab="appearance">Appearance</button>
     <button class="tab" data-tab="share">Share</button>
     <button class="tab" data-tab="console">Raw Console</button>
   </div>
@@ -161,11 +170,28 @@
       </div>
     </form>
     <hr class="rule" />
-    <p class="label">Change admin password</p>
-    <form id="formPassword" class="inline-form">
-      <input class="field" type="password" id="inputNewPassword" placeholder="New password" />
-      <button class="btn btn--secondary" type="submit">Update</button>
+    <p class="label">Admin users</p>
+    <p class="pane-hint">Each sound-desk operator gets their own username and password to log in. The built-in <strong>admin</strong> account can't be removed.</p>
+    <form id="formAddAdminUser" class="inline-form">
+      <input class="field" type="text" id="inputNewAdminUsername" placeholder="Username" autocomplete="off" maxlength="40" />
+      <input class="field" type="password" id="inputNewAdminPassword" placeholder="Password (min 4 characters)" autocomplete="new-password" />
+      <button class="btn btn--primary" type="submit">Add user</button>
     </form>
+    <div id="adminUsersTable" style="margin-top:14px"></div>
+  </div>
+
+  <div class="tabpane" id="pane-appearance">
+    <p class="pane-hint">Set the photo behind the login screen. It only affects the landing page; band members see it before they log in.</p>
+    <div class="landing-preview" id="coverPreview" style="background-image:url('/cover-default.jpg')" role="img" aria-label="Landing cover preview"></div>
+    <form id="formCover" class="stack" style="margin-top:14px">
+      <label class="label">Choose a photo</label>
+      <input class="field" type="file" id="inputCover" accept="image/png,image/jpeg,image/webp,image/gif" />
+      <div class="inline-form" style="margin:0">
+        <button class="btn btn--primary" type="submit">Upload cover</button>
+        <button class="btn btn--ghost" type="button" id="btnResetCover">Reset to default</button>
+      </div>
+    </form>
+    <p class="pane-hint" id="coverHint" style="margin-top:10px"></p>
   </div>
 
   <div class="tabpane" id="pane-share">
@@ -188,7 +214,7 @@
 </section>
 
 <div class="toast hidden" id="toast"></div>
-<div class="masthead-footer">Made By Frits Kayadoe</div>
+<div class="masthead-footer">Made By Frits Kayadoe for GPIB Bukit Zaitun Makassar</div>
 
 <script src="/app.js"></script>
 </body>

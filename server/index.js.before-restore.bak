@@ -93,57 +93,14 @@ function broadcastToMix(msg, mixId) {
   });
 }
 
-// Parse a console NOTIFY line into one of the app's live-update messages, so
-// changes made ON THE DESK (faders, scene recalls, another operator) reach the
-// browser. The desk broadcasts NOTIFY to every connection EXCEPT the one that
-// made the change, so this is exactly the "desk -> app" direction.
-//
-// Observed format (TF5):
-//   NOTIFY set MIXER:Current/InCh/ToMix/Level 5 7 -5900 "-59.00"
-//   NOTIFY set MIXER:Current/InCh/ToMix/On 5 7 0 "OFF"
-//   NOTIFY set MIXER:Current/Mix/Fader/Level 7 0 -6000 "-60.00"
-// Returns an update message ({type, mixId, ...}) or null if not relevant.
-const NEG_INF_UNIT = -32768;
-function parseNotify(line) {
-  if (typeof line !== "string") return null;
-  const parts = line.trim().split(/\s+/);
-  if (parts[0] !== "NOTIFY" || parts[1] !== "set") return null;
-  const path = parts[2] || "";
-  // Drop the trailing quoted display value, keep the numeric args.
-  const args = parts.slice(3).filter((t) => !t.startsWith("\"")).map((t) => parseInt(t, 10));
-  if (args.some((n) => !isFinite(n))) return null;
-
-  const levelFromUnit = (u) => (u === NEG_INF_UNIT ? db.mixer.faderMinDb : u / 100);
-
-  // Channel -> aux send level / on-off (mono inputs and stereo returns).
-  let m = /^MIXER:Current\/(InCh|FxRtnCh)\/ToMix\/(Level|On)$/.exec(path);
-  if (m) {
-    const list = m[1] === "FxRtnCh" ? db.returns : db.channels;
-    const mix = db.mixes.find((x) => x.index === args[1]);
-    const ch = list.find((c) => c.index === args[0]);
-    if (!mix || !ch) return null;
-    if (m[2] === "Level") {
-      return { type: "mixLevelUpdated", mixId: mix.id, channelId: ch.id, level: levelFromUnit(args[2]) };
-    }
-    return { type: "mixMuteUpdated", mixId: mix.id, channelId: ch.id, muted: args[2] === 0 };
-  }
-
-  // Aux master fader level / on-off.
-  m = /^MIXER:Current\/Mix\/Fader\/(Level|On)$/.exec(path);
-  if (m) {
-    const mix = db.mixes.find((x) => x.index === args[0]);
-    if (!mix) return null;
-    if (m[1] === "Level") {
-      return { type: "mixMasterUpdated", mixId: mix.id, level: levelFromUnit(args[2]) };
-    }
-    return { type: "mixMasterMuteUpdated", mixId: mix.id, muted: args[2] === 0 };
-  }
-
-  return null;
-}
-
 function startMixerClient() {
-  if (rcp) rcp.stop();
+  if (rcp) {
+    // Remove all listeners BEFORE stop() so that the old socket's async
+    // 'close' event cannot fire its 'status' handler and overwrite mixerStatus
+    // with { connected: false } after the new client has already connected.
+    rcp.removeAllListeners();
+    rcp.stop();
+  }
   mixerStatus = { connected: false, host: db.mixer.host, port: db.mixer.port };
   broadcast({ type: "mixerStatus", status: mixerStatus });
   const opts = { host: db.mixer.host, port: db.mixer.port };
@@ -153,10 +110,7 @@ function startMixerClient() {
     broadcast({ type: "mixerStatus", status: mixerStatus });
   });
   rcp.on("notify", (line) => {
-    broadcast({ type: "notify", line }); // keep the raw passthrough
-    // ...and turn console-originated changes into live strip updates.
-    const upd = parseNotify(line);
-    if (upd) broadcastToMix(upd, upd.mixId);
+    broadcast({ type: "notify", line });
   });
   rcp.start();
 }

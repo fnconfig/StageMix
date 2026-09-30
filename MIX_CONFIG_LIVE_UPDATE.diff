@@ -1,0 +1,282 @@
+﻿================================================================================
+ Stage Mix - Real-time aux/channel assignment propagation (mixConfigUpdated)
+ Generated: 2026-09-01  |  Files: server/index.js, public/app.js  (server/store.js NOT modified)
+ Diff is against the pre-change working state (excludes pre-existing edits
+ from 2026-08-30 that were already in the working tree).
+================================================================================
+
+diff --git "a/server/index.js (before)" "b/server/index.js (after)"
+index af75048..af8eef8 100644
+--- "a/server/index.js (before)"
++++ "b/server/index.js (after)"	
+@@ -42,6 +42,17 @@ function broadcast(msg) {
+   });
+ }
+ 
++// Send a message only to sockets that have subscribed to a specific aux mix.
++// Kept separate from broadcast() so the existing global messages (mixerStatus,
++// notify, mixesChanged, sessionsChanged, ...) keep their current behavior.
++// Sockets opt in by sending { type: "subscribe", mixId } after opening /ws.
++function broadcastToMix(msg, mixId) {
++  if (!wss) return;
++  const data = JSON.stringify(msg);
++  wss.clients.forEach((client) => {
++    if (client.readyState === 1 && client.mixId === mixId) client.send(data);
++  });
++}
+ 
+ function startMixerClient() {
+   if (rcp) rcp.stop();
+@@ -75,6 +86,19 @@ function findMix(id) {
+   return db.mixes.find((m) => m.id === id);
+ }
+ 
++// Snapshot of one aux mix's channel assignment, pushed to viewers in real time
++// whenever the admin changes which channels are in the mix.
++function mixConfigMessage(mix) {
++  return {
++    type: "mixConfigUpdated",
++    mixId: mix.id,
++    name: mix.name,
++    visible: mix.visible,
++    channels: db.channels
++      .filter((c) => mix.channelIds.includes(c.id))
++      .map((c) => ({ id: c.id, name: c.name, index: c.index })),
++  };
++}
+ 
+ function sanitizeSessions() {
+   const out = {};
+@@ -306,7 +330,15 @@ app.post("/api/admin/mixes/:id", requireAdmin, (req, res) => {
+   if (visible !== undefined) mix.visible = !!visible;
+   if (Array.isArray(channelIds)) mix.channelIds = channelIds;
+   store.save(db);
+-  broadcast({ type: "mixesChanged" });
++  if (Array.isArray(channelIds)) {
++    // Channel-to-aux assignment changed: push the new mix config straight to
++    // the clients actually viewing this mix, immediately after the write
++    // succeeds — no page reload on their side.
++    broadcastToMix(mixConfigMessage(mix), mix.id);
++  } else {
++    // Name/visibility only — keep the existing global refresh.
++    broadcast({ type: "mixesChanged" });
++  }
+   res.json({ ok: true, mix });
+ });
+ 
+@@ -326,7 +358,9 @@ app.post("/api/admin/channels/count", requireAdmin, (req, res) => {
+     db.mixes.forEach((m) => (m.channelIds = m.channelIds.filter((id) => !removed.includes(id))));
+   }
+   store.save(db);
+-  broadcast({ type: "mixesChanged" });
++  // Channel count changed, so every mix's channel list may have gained/lost
++  // entries — push each mix's updated config to its own viewers in real time.
++  db.mixes.forEach((m) => broadcastToMix(mixConfigMessage(m), m.id));
+   res.json({ ok: true, channels: db.channels });
+ });
+ 
+@@ -414,6 +448,20 @@ const server = app.listen(PORT, "0.0.0.0", () => {
+ wss = new WebSocketServer({ server, path: "/ws" });
+ wss.on("connection", (ws) => {
+   ws.send(JSON.stringify({ type: "mixerStatus", status: mixerStatus }));
++  ws.on("message", (raw) => {
++    let msg = null;
++    try { msg = JSON.parse(raw); } catch (e) { return; }
++    if (msg && msg.type === "subscribe" && typeof msg.mixId === "string") {
++      // Tag this socket with the aux mix its user is viewing so
++      // mixConfigUpdated broadcasts can be filtered to the right clients.
++      // Reuses the existing anonymous WS model — no new auth/session checks.
++      ws.mixId = msg.mixId;
++      // Push the current assignment immediately: covers reconnects where the
++      // client may have missed a change while the socket was down.
++      const mix = findMix(msg.mixId);
++      if (mix) ws.send(JSON.stringify(mixConfigMessage(mix)));
++    }
++  });
+ });
+ 
+ // ---- graceful shutdown ----
+diff --git "a/public/app.js (before)" "b/public/app.js (after)"
+index 9c106dc..29e4ba5 100644
+--- "a/public/app.js (before)"
++++ "b/public/app.js (after)"	
+@@ -10,6 +10,8 @@
+     currentMix: null,
+     faderMin: -60,
+     faderMax: 10,
++    ws: null,
++    subscribedMixId: null,
+   };
+ 
+   const $ = (sel) => document.querySelector(sel);
+@@ -67,6 +69,14 @@
+   function connectWs() {
+     const proto = location.protocol === "https:" ? "wss" : "ws";
+     const ws = new WebSocket(`${proto}://${location.host}/ws`);
++    state.ws = ws;
++    ws.onopen = () => {
++      // Re-announce which aux mix this client is watching on every (re)connect
++      // so mixConfigUpdated broadcasts keep flowing after a dropped socket.
++      if (state.subscribedMixId) {
++        ws.send(JSON.stringify({ type: "subscribe", mixId: state.subscribedMixId }));
++      }
++    };
+     ws.onmessage = (evt) => {
+       let msg;
+       try { msg = JSON.parse(evt.data); } catch (e) { return; }
+@@ -84,6 +94,7 @@
+           loadChannels();
+         }
+       }
++      if (msg.type === "mixConfigUpdated") applyMixConfig(msg);
+       if (msg.type === "sessionsChanged" && state.adminToken) {
+         refreshAdminUsers().catch(() => {});
+       }
+@@ -91,6 +102,14 @@
+     ws.onclose = () => setTimeout(connectWs, 2000);
+   }
+ 
++  // Tell the server which aux mix this client is viewing; the server then
++  // filters mixConfigUpdated broadcasts to matching sockets only.
++  function subscribeMix(mixId) {
++    state.subscribedMixId = mixId;
++    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
++      state.ws.send(JSON.stringify({ type: "subscribe", mixId }));
++    }
++  }
+ 
+   function setMixerStatus(status) {
+     const dot = $("#mixerDot");
+@@ -120,6 +139,7 @@
+   function clearSession() {
+     state.sessionToken = null;
+     state.sessionName = "";
++    state.subscribedMixId = null;
+     localStorage.removeItem("sm_session_token");
+     localStorage.removeItem("sm_session_name");
+   }
+@@ -173,6 +193,7 @@
+       localStorage.setItem("sm_session_token", data.token);
+       localStorage.setItem("sm_session_name", data.name);
+       state.currentMix = data.mix;
++      subscribeMix(data.mix.id);
+       await openFaderView();
+     } catch (e) {
+       toast(e.message);
+@@ -217,20 +238,95 @@
+     return min + (max - min) * (pct / 100);
+   }
+ 
++  function createStrip(ch) {
++    const strip = document.createElement("div");
++    strip.className = "fader-strip";
++    strip.dataset.channelId = ch.id; // used by mergeFaderRack to match strips
++    strip.innerHTML = `
++      <div class="fader-strip__name">${escapeHtml(ch.name)}</div>
++      <div class="fader-strip__db" data-db></div>
++      <div class="fader-track" data-min="${state.faderMin}" data-max="${state.faderMax}">
++        <div class="fader-cap" data-cap></div>
++      </div>
++      <button class="mute-btn" data-mute type="button">Mute</button>
++    `;
++    return strip;
++  }
++
+   function renderFaderRack(channels) {
+     const rack = $("#faderRack");
+     rack.innerHTML = "";
+     channels.forEach((ch) => {
+-      const strip = document.createElement("div");
+-      strip.className = "fader-strip";
+-      strip.innerHTML = `
+-        <div class="fader-strip__name">${escapeHtml(ch.name)}</div>
+-        <div class="fader-strip__db" data-db></div>
+-        <div class="fader-track" data-min="${state.faderMin}" data-max="${state.faderMax}">
+-          <div class="fader-cap" data-cap></div>
+-        </div>
+-        <button class="mute-btn" data-mute type="button">Mute</button>
+-      `;
++      const strip = createStrip(ch);
++      rack.appendChild(strip);
++      const track = strip.querySelector(".fader-track");
++      const cap = strip.querySelector("[data-cap]");
++      const dbLabel = strip.querySelector("[data-db]");
++      const muteBtn = strip.querySelector("[data-mute]");
++      setupFader(track, cap, dbLabel, ch, strip);
++      setupMute(muteBtn, strip, ch);
++    });
++  }
++
++  // ---- real-time mix config updates (admin changed channel assignments) ----
++  async function applyMixConfig(msg) {
++    if (!state.currentMix || msg.mixId !== state.currentMix.id) return; // not our aux mix
++    if (document.getElementById("view-user-fader").classList.contains("hidden")) return; // not on the fader screen
++    // Mix name may have changed with the assignment.
++    state.currentMix = { id: msg.mixId, name: msg.name };
++    $("#faderMixName").textContent = msg.name;
++    const masterLabel = document.querySelector("#masterFaderStrip .fader-strip__name--mix-label");
++    if (masterLabel) masterLabel.textContent = msg.name;
++    // Fetch authoritative levels/mute state — needed for channels that are new
++    // to this mix. Kept channels keep their current fader position untouched
++    // below (their strips are never rebuilt).
++    let data;
++    try {
++      data = await api("/api/channels");
++    } catch (e) {
++      if (e.status === 401 || e.status === 410) {
++        clearSession();
++        toast("Please rejoin your mix.");
++        showView("landing");
++        return;
++      }
++      toast(e.message);
++      return;
++    }
++    mergeFaderRack(data.channels);
++  }
++
++  // Update the channel rack in place: remove strips for channels that are no
++  // longer in the aux mix, keep every still-assigned strip exactly as-is
++  // (fader position, mute state, and any in-progress drag are preserved),
++  // and append fresh strips only for newly assigned channels.
++  function mergeFaderRack(channels) {
++    const rack = $("#faderRack");
++    const existing = new Map();
++    rack.querySelectorAll(".fader-strip").forEach((strip) => {
++      if (strip.dataset.channelId) existing.set(strip.dataset.channelId, strip);
++    });
++
++    // Channels that left this aux mix: remove their control strip gracefully —
++    // the DOM node just disappears, no errors, no reload.
++    const keep = new Set(channels.map((c) => c.id));
++    existing.forEach((strip, id) => {
++      if (!keep.has(id)) {
++        strip.remove();
++        existing.delete(id);
++      }
++    });
++
++    channels.forEach((ch) => {
++      let strip = existing.get(ch.id);
++      if (strip) {
++        // Still assigned: only refresh the name label if the admin renamed it.
++        const nameEl = strip.querySelector(".fader-strip__name");
++        if (nameEl && nameEl.textContent !== ch.name) nameEl.textContent = ch.name;
++        return;
++      }
++      // Newly assigned channel: create a fresh strip with the fetched level.
++      strip = createStrip(ch);
+       rack.appendChild(strip);
+       const track = strip.querySelector(".fader-track");
+       const cap = strip.querySelector("[data-cap]");
+@@ -772,6 +868,7 @@
+       .then((data) => {
+         state.sessionName = data.name;
+         state.currentMix = data.mix;
++        subscribeMix(data.mix.id);
+         openFaderView();
+       })
+       .catch(() => { clearSession(); showView("landing"); });
+
+
+

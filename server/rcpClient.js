@@ -65,6 +65,7 @@ class RcpClient extends EventEmitter {
 
   _connect() {
     if (!this.shouldRun) return;
+    console.log(`[RCP] connecting to ${this.host}:${this.port}`);
     this.socket = new net.Socket();
     this.socket.setTimeout(5000);
 
@@ -72,23 +73,27 @@ class RcpClient extends EventEmitter {
       this.connected = true;
       this._reconnectDelay = 1000;
       this.socket.setTimeout(0); // no timeout once actually connected
+      console.log(`[RCP] connected to ${this.host}:${this.port}`);
       this.emit("status", { connected: true, host: this.host, port: this.port });
     });
 
     this.socket.on("timeout", () => {
       // Connection attempt (or an unresponsive link) took too long - treat
       // as a failure so the UI doesn't sit on stale/unknown status.
+      console.log(`[RCP] connection attempt to ${this.host}:${this.port} timed out`);
       this.socket.destroy(new Error("Connection to mixer timed out"));
     });
 
     this.socket.on("data", (chunk) => this._onData(chunk));
 
     this.socket.on("error", (err) => {
+      console.log(`[RCP] socket error: ${err.message}`);
       this.emit("status", { connected: false, error: err.message, host: this.host, port: this.port });
     });
 
     this.socket.on("close", () => {
       this.connected = false;
+      console.log(`[RCP] connection lost${this.shouldRun ? `, reconnecting in ${this._reconnectDelay}ms` : ""}`);
       this.emit("status", { connected: false, host: this.host, port: this.port });
       // fail any pending requests
       while (this.queue.length) {
@@ -145,38 +150,76 @@ class RcpClient extends EventEmitter {
         // the wrong value. Safer to treat a timeout as "this connection is in
         // an unknown state" and reconnect cleanly (this also rejects every
         // other pending request via the socket's 'close' handler).
+        console.log(`[RCP] command timed out: ${cmd}`);
         reject(new Error("Mixer did not respond in time"));
         if (this.socket) this.socket.destroy(new Error("Command timed out"));
-      }, 3000);
+      }, 5000);
       this.queue.push({ resolve, reject, timer });
       this.socket.write(cmd + "\n");
     });
   }
 
   // ---- high level helpers ----
+  // Channel "kind" selects the RCP element: "in" = mono InCh, "fx" = stereo
+  // return FxRtnCh. Both share the identical ToMix/Level|On and Label/Name
+  // shapes (N x 20 and N x 0), so only the path segment differs.
+  static _chPath(kind, sub) {
+    const seg = kind === "fx" ? "FxRtnCh" : "InCh";
+    return `MIXER:Current/${seg}/${sub}`;
+  }
 
-  async getToMixLevel(chIndex, mixIndex) {
-    const line = await this._send(`get MIXER:Current/InCh/ToMix/Level ${chIndex} ${mixIndex}`);
+  async getToMixLevel(kind, chIndex, mixIndex) {
+    const line = await this._send(`get ${RcpClient._chPath(kind, "ToMix/Level")} ${chIndex} ${mixIndex}`);
     return unitToDb(this._extractValue(line));
   }
 
-  async setToMixLevel(chIndex, mixIndex, db) {
+  async setToMixLevel(kind, chIndex, mixIndex, db) {
     const unit = dbToUnit(db);
-    await this._send(`set MIXER:Current/InCh/ToMix/Level ${chIndex} ${mixIndex} ${unit}`);
+    await this._send(`set ${RcpClient._chPath(kind, "ToMix/Level")} ${chIndex} ${mixIndex} ${unit}`);
     return db;
   }
 
-  async setToMixOn(chIndex, mixIndex, on) {
-    await this._send(`set MIXER:Current/InCh/ToMix/On ${chIndex} ${mixIndex} ${on ? 1 : 0}`);
+  async setToMixOn(kind, chIndex, mixIndex, on) {
+    await this._send(`set ${RcpClient._chPath(kind, "ToMix/On")} ${chIndex} ${mixIndex} ${on ? 1 : 0}`);
   }
 
-  async getToMixOn(chIndex, mixIndex) {
-    const line = await this._send(`get MIXER:Current/InCh/ToMix/On ${chIndex} ${mixIndex}`);
+  async getToMixOn(kind, chIndex, mixIndex) {
+    const line = await this._send(`get ${RcpClient._chPath(kind, "ToMix/On")} ${chIndex} ${mixIndex}`);
     return this._extractValue(line) === 1;
   }
 
-  async getChannelName(chIndex) {
-    const line = await this._send(`get MIXER:Current/InCh/Label/Name ${chIndex} 0`);
+  async getChannelName(kind, chIndex) {
+    const line = await this._send(`get ${RcpClient._chPath(kind, "Label/Name")} ${chIndex} 0`);
+    const m = line.match(/"([^"]*)"/);
+    return m ? m[1] : null;
+  }
+
+  // ---- DCA (group) faders ----
+  // DCA has no ToMix send; a DCA fader scales the level of its assigned group
+  // on the main mix. Paths confirmed via prminfo 48/50/58 (DCA/Fader/Level,
+  // DCA/Fader/On, DCA/Label/Name: all 8 x 0).
+  async getDcaLevel(dcaIndex) {
+    const line = await this._send(`get MIXER:Current/DCA/Fader/Level ${dcaIndex} 0`);
+    return unitToDb(this._extractValue(line));
+  }
+
+  async setDcaLevel(dcaIndex, db) {
+    const unit = dbToUnit(db);
+    await this._send(`set MIXER:Current/DCA/Fader/Level ${dcaIndex} 0 ${unit}`);
+    return db;
+  }
+
+  async setDcaOn(dcaIndex, on) {
+    await this._send(`set MIXER:Current/DCA/Fader/On ${dcaIndex} 0 ${on ? 1 : 0}`);
+  }
+
+  async getDcaOn(dcaIndex) {
+    const line = await this._send(`get MIXER:Current/DCA/Fader/On ${dcaIndex} 0`);
+    return this._extractValue(line) === 1;
+  }
+
+  async getDcaName(dcaIndex) {
+    const line = await this._send(`get MIXER:Current/DCA/Label/Name ${dcaIndex} 0`);
     const m = line.match(/"([^"]*)"/);
     return m ? m[1] : null;
   }
@@ -188,6 +231,29 @@ class RcpClient extends EventEmitter {
     const line = await this._send(`get MIXER:Current/Mix/Label/Name ${mixIndex} 0`);
     const m = line.match(/"([^"]*)"/);
     return m ? m[1] : null;
+  }
+
+  // Master fader level for an aux mix (Mix/Fader/Level uses same N×0 shape)
+  async getMixLevel(mixIndex) {
+    const line = await this._send(`get MIXER:Current/Mix/Fader/Level ${mixIndex} 0`);
+    return unitToDb(this._extractValue(line));
+  }
+
+  async setMixLevel(mixIndex, db) {
+    const unit = dbToUnit(db);
+    await this._send(`set MIXER:Current/Mix/Fader/Level ${mixIndex} 0 ${unit}`);
+    return db;
+  }
+
+  // Mix master on/off ("On" == unmuted, same convention as InCh/ToMix/On).
+  // Path confirmed via prminfo 61: MIXER:Current/Mix/Fader/On (20 mix x 0, 0..1, default 1).
+  async getMixOn(mixIndex) {
+    const line = await this._send(`get MIXER:Current/Mix/Fader/On ${mixIndex} 0`);
+    return this._extractValue(line) === 1;
+  }
+
+  async setMixOn(mixIndex, on) {
+    await this._send(`set MIXER:Current/Mix/Fader/On ${mixIndex} 0 ${on ? 1 : 0}`);
   }
 
   async raw(cmd) {

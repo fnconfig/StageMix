@@ -1,200 +1,591 @@
-# Stage Mix — band monitor-mix web app
+# Stage Mix
 
-A small self-hosted web app for your church band: each player types their name,
-picks their monitor (aux) send, and drags their own faders. It talks to a
-Yamaha TF-series console using **Send on Fader** over the RCP protocol
-documented at https://github.com/BrenekH/yamaha-rcp-docs.
+Self-hosted **band monitor-mix web app** for Yamaha TF-series digital consoles.
+Each band member opens a URL on their own phone (no app install), types their
+name, picks their monitor (aux) send, and drags their own faders — **Send on
+Fader** over Yamaha's **RCP** protocol (TCP port `49280`).
 
-It matches the flow you sketched:
+> This is the single source of truth for the project: overview, tech stack,
+> architecture, API, deployment, operations and history. The previous
+> `AI_*.md`, `tech-stack.md`, `PRODUCTION_READINESS_REPORT.md` and dated status
+> reports were consolidated into this file.
 
-- **Normal User**: enter name → select aux channel → drag faders (send levels)
-  for that mix.
-- **Admin** (password protected): choose which aux mixes are available/shown,
-  and remove a connection by typing someone's name.
+---
 
-## 1. Run it
+## 1. What it is
 
-Requires Node.js 18+.
+| | |
+|---|---|
+| **Package** | `monitor-mix-app` v1.0.0 (`package.json`) |
+| **Purpose** | Let each musician control their own monitor mix from their phone |
+| **Hardware** | Yamaha TF1 / TF3 / TF5 / TF-Rack (RCP over TCP `49280`) |
+| **Runtime** | Node.js ≥ 18, Express 4, `ws` 8 |
+| **Frontend** | Vanilla HTML/CSS/JS single-page app — **no framework, no build step** |
+| **Storage** | Single JSON file (`data/config.json`) |
+| **Install** | None for users — they just open a URL on the same Wi-Fi/LAN |
+
+Two user roles:
+
+- **Band member (normal user)** — no login. Enter name → select aux channel →
+  drag faders / mute their own monitor sends. Also gets an aux **master** fader.
+- **Sound desk operator (admin)** — username + password. Controls which aux
+  mixes are visible, which channels appear in each mix and in what order,
+  channel/aux naming, console connection, admin accounts, the landing cover,
+  active users, and a raw console command box.
+
+---
+
+## 2. Quick start
+
+### Windows (normal case — the sound laptop)
+
+```bat
+stagemix start        :: or double-click start.bat
+stagemix status
+stagemix stop         :: or double-click stop.bat
+stagemix restart      :: or double-click restart.bat
+```
+
+`stagemix.cmd` is a thin wrapper around `scripts\stagemix.ps1` (Windows
+PowerShell 5.1) and accepts:
+
+| Command | Effect |
+|---|---|
+| `start` | Installs deps on first run, starts Node hidden in the background, writes `logs\stagemix.pid`, and opens the tray indicator |
+| `stop` | Stops the server (PID file, else the node process listening on the port) and closes the tray icon |
+| `restart` | Stop → 700 ms → start |
+| `status` | Reports whether the app is running (PID file, else HTTP `/health` probe) |
+| `tray` | Re-open the tray indicator (green = running, red = stopped) |
+| `install` | Adds this folder to the **user PATH** so `stagemix` works from any shell |
+| `uninstall` | Removes that PATH entry |
+| `help` | Usage |
+
+Logs: `logs\stagemix-out.log`, `logs\stagemix-err.log`.
+Port override: set `STAGEMIX_PORT` (launcher) or `PORT` (server) — default `3000`.
+
+The tray indicator polls `/health` every 3 s and its right-click menu offers
+*Open web UI / Start / Stop / Restart / Exit*.
+
+### Manual / Linux
 
 ```bash
-cd monitor-mix-app
 npm install
-npm start
+npm start            # node server/index.js
 ```
 
-Open `http://localhost:3000` on the sound laptop, and `http://<that computer's LAN IP>:3000`
-from band members' phones (same Wi-Fi as the laptop). No install needed on their end — it's just a web page.
+Then open `http://localhost:3000` on the sound desk machine and
+`http://<this-computer's-LAN-IP>:3000` on the band's phones.
 
-It starts in **simulated mixer mode** so you can click through the whole app —
-join a mix, drag faders, use the admin screens — with no console attached.
-Fader moves are stored in memory and behave like a real mixer would.
+The app starts in **simulated mixer mode** (`mode: "mock"`) so the whole flow —
+join, faders, mutes, admin — can be exercised with no console attached.
 
-## 2. Point it at your real TF console
+**Default admin password is `admin123` — change it immediately** (Mixer Link tab
+→ admin users, or Channels/Appearance tab → Admin users).
 
-1. On the TF console: **Setup → Network → enable RCP / external control** (this
-   is the same connection Companion, QLab, etc. use), note the console's IP
-   address. RCP listens on **TCP port 49280**.
-2. In the app, go to **Sound desk → Mixer Link**. You'll see a live status
-   readout (a dot + text showing exactly what it's connected to, or what it's
-   trying to reach). Switch **Mode** to *Real TF console*, type in the
-   console's IP address and port `49280`, and hit **Connect**. There's also a
-   **Retry connection** button if the link drops and you just want it to try
-   again without changing anything.
-3. If the mixer isn't connected, **everyone** using the app — band members
-   included — sees a clear red banner across the top of the screen saying the
-   console is offline and that fader/mute changes won't reach it. It
-   disappears automatically the moment the connection comes back. A small
-   status dot in the top bar (grey/red = offline, teal = connected) is always
-   visible too.
+---
 
-The command shapes this app uses (paths, index ranges, and the dB × 100
-scale) are confirmed against the console's own self-description
-(`prminfo`), captured in bitfocus/companion-module-yamaha-rcp's
-`TF Parameters-1.txt` (that repo is credited as a source inside
-`yamaha-rcp-docs` — its per-command pages are mostly stubs, so this was the
-way to pin down exact behavior without a physical console in hand):
+## 3. Tech stack
 
-| Path | Index shape | Range | Notes |
+### Frontend (`public/`)
+| Technology | Use |
+|---|---|
+| **HTML5** | SPA shell: landing, name entry, mix picker, fader rack, admin dashboard |
+| **CSS3 (vanilla)** | Dark design system, CSS variables, Flexbox/Grid, glassmorphism |
+| **Container queries** | `container-type: inline-size` + `clamp(…cqi…)` so channel names and dB readouts autofit narrow fader strips |
+| **Fonts** | Google Fonts — Oswald (headings), Inter (UI), JetBrains Mono (dB/technical) |
+| **Vanilla JS (ES6+)** | Client routing, pointer/touch fader drag, REST client, WebSocket lifecycle, admin panels. No React/Vue/Angular/TypeScript, ever |
+
+### Backend (`server/`)
+| Technology | Use |
+|---|---|
+| **Node.js ≥ 18** | CommonJS (`"type": "commonjs"`), entry `server/index.js` |
+| **Express 4** | REST API, static assets, JSON body parsing (`12mb` limit for base64 cover uploads), request logging, session/admin middleware |
+| **`ws` 8** | WebSocket server on `/ws` — live status, live fader mirroring, admin boot events |
+| **`net.Socket`** | One persistent TCP socket to the console (RCP, port `49280`) |
+| **`crypto`** | `scryptSync` password hashing (salt + `timingSafeEqual` verify), `randomUUID` tokens |
+| **JSON file store** | `server/store.js` → `data/config.json` (config, sessions, password hashes) |
+| **`os` / `fs`** | LAN IP auto-detection for the Share tab; cover image streaming |
+
+### Operational layer
+- **Windows launchers** — `stagemix.cmd` + `scripts/*.ps1` (background start, PID file, tray indicator)
+- **PM2 or systemd** — for the Ubuntu server deployment (PM2 recommended: log rotation, restart-on-boot, no root unit file)
+- **Cloudflare Tunnel** — public HTTPS ingress
+- **Tailscale** — private mesh VPN carrying RCP traffic to the church LAN
+- **`/health`** — unauthenticated JSON endpoint for supervisors/tunnel health checks
+
+---
+
+## 4. Architecture
+
+```
+        Phones / tablets / sound-desk browser
+                     │  HTTP REST (faders, mutes, admin)
+                     │  WebSocket /ws (live status + mirroring)
+                     ▼
+        ┌───────────────────────────────────────────┐
+        │        Node.js + Express (port 3000)      │
+        │  session & admin middleware · JSON store  │
+        │  WebSocket broadcast · NOTIFY parser      │
+        └───────────────────┬───────────────────────┘
+                            │  ONE persistent TCP socket (RCP, 49280)
+                    ┌───────┴────────┐
+                    ▼                ▼
+           Real Yamaha TF       Mock RCP emulator
+           (mode: "real")       (mode: "mock")
+```
+
+Design rules the code holds to:
+
+1. **Exactly one TCP connection** to the console. RCP has no correlation IDs, so
+   commands are serialized through a FIFO queue on that single socket.
+2. **The browser never talks to the mixer.** Every request is relayed by Express.
+3. **Server owns validation.** Fader/mute/DCA requests are checked against the
+   user's own assigned mix before anything reaches the console.
+4. **Never crash on disconnect** — reconnect with backoff, keep serving, and tell
+   every client via a `mixerStatus` broadcast.
+5. **Zero frontend dependencies.** No build step, no framework, no TypeScript.
+
+---
+
+## 5. Project structure
+
+```
+Stagemix/
+├── public/                       frontend, served statically (no-store)
+│   ├── index.html                SPA shell + all views
+│   ├── app.js                    routing, fader mechanics, WS client, admin UI
+│   ├── styles.css                dark design system, fader rack, landing cover
+│   └── cover-default.jpg         bundled default landing photo
+├── server/                       backend
+│   ├── index.js                  Express routes, WS broadcast, NOTIFY parser
+│   ├── rcpClient.js              real RCP TCP client for Yamaha TF
+│   ├── mockRcpClient.js          drop-in simulator, same interface
+│   └── store.js                  config persistence, scrypt hashing, migrations
+├── scripts/                      Windows operational layer
+│   ├── stagemix.ps1              start/stop/restart/status/tray/install
+│   ├── stagemix-common.ps1       shared paths, PID/health helpers
+│   └── stagemix-tray.ps1         system-tray status indicator
+├── data/config.json              runtime config + sessions (git-ignored)
+├── logs/                         stdout/stderr, PID files (git-ignored)
+├── stagemix.cmd                  CLI launcher
+├── start.bat / stop.bat / restart.bat   double-click wrappers
+├── package.json                  deps: express, ws — Node ≥ 18
+└── README.md                     this file
+```
+
+Views: `view-landing`, `view-user-name`, `view-user-mix`, `view-user-fader`,
+`view-admin-login`, `view-admin-dash`.
+Admin tabs: **Aux Mixes · Active Users · Channels · Mixer Link · Appearance ·
+Share · Raw Console**.
+
+---
+
+## 6. Connecting to a real Yamaha TF console
+
+1. On the console: **Setup → Network** → enable RCP / external control.
+   Note its IP. RCP listens on **TCP 49280**.
+2. In the app: **Sound desk → Mixer Link** → set **Mode** to *Real TF console*,
+   enter host + port `49280`, press **Connect**. *Retry connection* re-attempts
+   without changing settings.
+3. If the console is offline, **every** client (band members included) sees a red
+   banner saying fader/mute changes won't reach the desk; it clears automatically
+   when the link returns. A status dot in the top bar (grey/red = offline,
+   teal = connected) is always visible.
+
+### RCP commands used
+
+| Path | Indices | Range | Meaning |
 |---|---|---|---|
-| `InCh/Label/Name` | `<ch 0-39> 0` | string | channel name |
-| `InCh/ToMix/Level` | `<ch 0-39> <mix 0-19>` | -32768..1000, dB×100 | send level (fader) |
-| `InCh/ToMix/On` | `<ch 0-39> <mix 0-19>` | 0/1 | send mute (1 = unmuted) |
-| `Mix/Label/Name` | `<mix 0-19>` | string | aux name — single index, no channel dimension |
+| `MIXER:Current/InCh/ToMix/Level` | `<ch 0-39> <mix 0-19>` | -32768..1000 | send level, dB × 100 (`-32768` = -∞) |
+| `MIXER:Current/InCh/ToMix/On` | `<ch 0-39> <mix 0-19>` | 0/1 | send mute (1 = unmuted) |
+| `MIXER:Current/InCh/Label/Name` | `<ch 0-39> 0` | string | channel name |
+| `MIXER:Current/Mix/Label/Name` | `<mix 0-19> 0` | string | aux name |
+| `MIXER:Current/Mix/Fader/Level` | `<mix 0-19> 0` | -32768..1000 | aux master level |
+| `MIXER:Current/Mix/Fader/On` | `<mix 0-19> 0` | 0/1 | aux master on/off |
+| `MIXER:Current/FxRtnCh/ToMix/Level\|On` | `<fx 0-3> <mix 0-19>` | as above | stereo return send |
+| `MIXER:Current/DCA/Fader/Level\|On` | `<dca 0-7> 0` | as above | DCA group fader |
+| `MIXER:Current/DCA/Label/Name` | `<dca 0-7> 0` | string | DCA name |
 
-A TF console only answers for as many channels/mixes as it actually has
-patched (TF1=16ch, TF3=24ch, TF5=32ch; up to 20 mixes depending on config) —
-requests beyond that will error, and the app treats that as "not available"
-rather than crashing.
+dB × 100 encoding: `10.00 dB = 1000`, `-60.00 dB = -6000`, `-∞ = -32768`.
+Command shapes were pinned against the console's own `prminfo` self-description
+(see bitfocus/companion-module-yamaha-rcp's `TF Parameters-1.txt`).
 
-Still worth a quick check before a real rehearsal: go to **Sound desk → Raw
-Console** and try `get MIXER:Current/InCh/ToMix/Level 0 0`, then move that
-channel's Aux 1 send on the physical console and `get` it again, to confirm
-the numbers line up with what you see on the console's own screen.
+A TF only answers for channels/mixes it actually has (TF1 = 16 ch, TF3 = 24,
+TF5 = 32; up to 20 mixes). Requests beyond that are treated as "not available"
+rather than fatal.
 
 ### If it won't connect
+RCP has **no password** on TF consoles (the only password-like setting belongs to
+Yamaha's separate "MonitorMix" phone app). Usual causes, in order:
 
-**No, RCP itself doesn't have a password** on TF consoles — the only
-password-like setting that exists in the console's own parameter list is for
-Yamaha's separate built-in "MonitorMix" feature (their own phone app), which
-is a different thing entirely and doesn't affect this app. So if the
-connection is failing, it's almost always one of these instead:
+1. RCP/external control not enabled on the console.
+2. Wrong IP, or the console has separate Dante and Network ports — RCP only works
+   on the **NETWORK** port's IP.
+3. App host and console not on the same subnet/VLAN.
+4. Something else already holds the single RCP client slot (Companion, QLab,
+   another instance of this app).
+5. Windows Firewall blocking the outbound connection (rare).
 
-1. **RCP isn't enabled** — Setup → Network → make sure external/RCP control
-   is switched on.
-2. **Wrong IP or the console has multiple network ports** — TF consoles often
-   have separate Dante and Network ports; RCP only works over the **NETWORK**
-   port's IP, not a Dante primary/secondary address.
-3. **Not on the same network** — the computer running this app and the
-   console need to be reachable from each other (same subnet/VLAN, not
-   separated by a router doing NAT between them).
-4. **Something else is already connected** — some consoles only accept one
-   RCP client at a time. If Companion, QLab, or another instance of this app
-   is already connected, close it first.
-5. **Windows Firewall blocking outbound** — rare, but worth checking if
-   everything else looks right.
+Test the path outside the app:
 
-A quick way to test the network path itself, outside this app entirely, from
-PowerShell on the computer running it:
 ```powershell
-Test-NetConnection -ComputerName 192.168.1.50 -Port 49280
-```
-If `TcpTestSucceeded` comes back `False`, it's a network/console-setting
-problem, not this app — narrows it down fast.
-
-## 3. Set up your mixes and channels
-
-- **Sound desk → Aux Mixes**: the console's 16 aux sends are all listed;
-  flip the switch on however many you want band members to be able to pick
-  from. Only visible mixes show up on the "Select Aux Channel" screen.
-- **Limit which channels show up in a mix**: click **Channels** on any mix's
-  row to open a checklist of every input channel — tap to include/exclude,
-  use Select all/none, then **Save channels**. Handy for keeping a click
-  track or talkback channel out of everyone's mix except the drummer's, for
-  example. Defaults to every channel visible in every mix.
-- **Pull names from console** (button on the Aux Mixes tab): fetches the real
-  channel and aux names already set on the desk (`InCh/Label/Name` and
-  `Mix/Label/Name`) and uses them everywhere in the app, instead of the
-  generic "Channel 1" / "Aux 1" placeholders. Safe to run any time the
-  console is connected — it only overwrites names the console actually
-  answers for.
-- **Sound desk → Channels**: rename channels by hand if you'd rather not pull
-  from the console, and set how many are in use (TF5 = up to 32, TF3 = 24,
-  TF1/TF-Rack = 16).
-
-## 4. Muting
-
-Each fader strip has a **Mute** button under it, which flips that channel's
-send to the player's own mix on and off (`InCh/ToMix/On`) — it only mutes
-their monitor send, not the channel itself out front.
-
-## 5. Give band members access
-
-Sound desk → **Share** shows the actual network address for this computer
-(auto-detected, so you don't need to hunt through `ipconfig`) — copy it and
-send it to the band (text, WhatsApp, whatever), or just read it out. Each
-person opens that address in their phone's browser (no app install needed),
-taps **"I'm on stage,"** types their name, and picks their mix.
-
-Requirements:
-- Everyone's phone needs to be on the **same Wi-Fi network** as the computer
-  running this app.
-- If phones can't reach it, Windows Firewall is the usual culprit — when you
-  first run `npm start`, Windows may prompt "Allow Node.js to communicate on
-  private networks?" → say **yes**. If you missed that prompt, open
-  **Windows Defender Firewall → Allow an app through firewall** and make sure
-  Node.js is allowed on **Private** networks.
-
-## 6. Change the admin password
-
-Default admin password is `admin123` — change it immediately from
-**Sound desk → Mixer Link → Change admin password**.
-
-## How the pieces fit together
-
-```
-public/            the phone/browser UI (no build step, plain HTML/CSS/JS)
-server/index.js     Express API + WebSocket (live status/removal push)
-server/rcpClient.js  real TCP client for the console (RCP protocol)
-server/mockRcpClient.js  drop-in simulator, same interface, no hardware needed
-server/store.js     tiny JSON-file persistence (data/config.json)
+Test-NetConnection -ComputerName 192.168.18.89 -Port 49280   # TcpTestSucceeded must be True
 ```
 
-Band members' sessions aren't logged in — they just have a name and a browser
-token stored in that phone's browser (`localStorage`). Admin sessions require
-the password and a token stored only for that browser tab (`sessionStorage`),
-so it clears when the tab is closed.
+Reconnect behaviour: delay starts at 1 s, multiplies ×1.5, capped at **15 s**
+(spec asks for 30 s — see roadmap), reset to 1 s on a successful connect. Every
+pending command is rejected cleanly when the socket drops. Per-command timeout is
+**5 s** while connecting and disabled once connected; a mid-queue timeout destroys
+the socket to force a clean reconnect rather than mismatching FIFO replies.
 
-## Known limitations / next steps
+---
 
-- **Fixed:** an earlier version had a routing bug where raising the channel
-  count above the default 16 (Sound desk → Channels) silently failed. That's
-  now fixed — bump the count to match your console (TF5 = up to 32) *before*
-  using "Pull names from console", since it only fetches names for channels
-  you've told the app exist.
-- **Fixed:** aux/mix names were being pulled with the wrong command shape —
-  `Mix/Label/Name` needs the same two index arguments (`<mix> 0`) that
-  `InCh/Label/Name` does, and the app was only sending one. If your aux names
-  still don't match after updating, try the Raw Console (see below) and send
-  me what comes back.
-- **Fixed:** if a band member already had their fader screen open and the
-  sound desk changed which channels were visible in that mix (or the channel
-  count, or a channel's name), it didn't show up on their screen until they
-  logged out and rejoined. It now updates live within a second or two.
-- **Fixed:** loading a stage member's fader screen was doing up to 64
-  sequential round-trips to the console (level + mute, one channel at a
-  time) — on real hardware this could take long enough to feel frozen, and
-  because everything shares one connection, it also delayed the user's own
-  fader/mute commands behind that queue. It's now fetched in parallel, which
-  should feel close to instant. If a channel genuinely doesn't respond
-  (nothing patched at that input), the connection now cleanly reconnects
-  rather than risking a later reply landing on the wrong channel.
-- "Pull names from console" now warns you if you're still in **Simulated**
-  mode (Sound desk → Mixer Link) — in that mode it fills in made-up
-  placeholder names, not your real console's, which is easy to mistake for a
-  bug. Switch to *Real TF console* mode first.
-- One admin password shared by whoever runs sound — no per-user admin accounts.
-- This assumes one console. If your church ever runs two consoles/rooms,
-  the `mixer` config would need to become a list.
-- "Pull names from console" is one-way (console → app) and only runs when you
-  click the button — it doesn't continuously mirror renames made on the
-  console mid-service. Re-click it any time names change.
+## 7. Running the desk (admin dashboard)
+
+- **Aux Mixes** — the console's 16 aux sends are listed; flip the switch on the
+  ones band members may pick. Each mix row has a **Channels** picker: an *ordered*
+  list (▲▼ reorder, ✕ remove, "add" chips for channels not in the mix), plus
+  select all/none. `mix.channelIds` order is the **single source of truth** for
+  the order users see — there is no per-device override.
+- **Pull names from console** (Aux Mixes tab) — one-shot fetch of real
+  `InCh/Label/Name`, `FxRtnCh` and `Mix/Label/Name` values; overwrites only names
+  the console actually answers for. Only touches the console when connected, and
+  warns if you're still in **Simulated** mode (where it would fill in placeholders).
+- **Channels** — rename inputs by hand and set how many are in use (up to 40;
+  TF5 = 32, TF3 = 24, TF1/TF-Rack = 16). Set the count to match the desk *before*
+  pulling names, since only existing channels are queried.
+- **Stereo returns** — Fx 1–4 (`fx1…fx4`) can be assigned into mixes alongside
+  mono inputs.
+- **Active Users** — who is connected, which mix, and when they logged in
+  (local date/time). Remove a user by name; their phone is kicked via a
+  `sessionRemoved` broadcast.
+- **Mixer Link** — host, port, mode (mock/real), fader dB range, reconnect,
+  admin users.
+- **Appearance** — upload a custom landing cover (PNG/JPEG/WebP/GIF, ≤ 8 MB,
+  stored as `data/cover.jpg`, served through `/cover`) or reset to the bundled
+  default photo.
+- **Share** — auto-detected LAN address(es) to hand out to the band.
+- **Raw Console** — send an arbitrary RCP line and read the reply. Useful for
+  verifying values, e.g. `get MIXER:Current/InCh/ToMix/Level 0 0`, then moving that
+  send on the physical desk and getting it again.
+
+---
+
+## 8. API reference
+
+### REST — public
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/health` | `{ status, uptime, mixer }` — no auth, never touches the mixer |
+| GET | `/api/landing` | `{ coverUrl }` active landing cover |
+| GET | `/cover` | streams `data/cover.jpg` (404 if none uploaded) |
+| GET | `/api/mixes` | `{ mixes: [{id,name}], mixerConnected }` — visible mixes only |
+| POST | `/api/session` | `{ name, mixId }` → `{ token, name, mix }`; 400 if name missing or mix hidden |
+
+### REST — normal user (`x-session-token`)
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/session/check` | `{ ok, name, mix }`; 401 unknown token, 410 removed by admin |
+| GET | `/api/channels` | `{ mix:{id,name,index,masterLevel,masterOn}, channels[], dca[], mixerConnected }` — fetched **sequentially** (level then mute per channel) to keep the RCP queue short |
+| POST | `/api/fader` | `{ channelId, level }` → clamped to the fader range; 400 unknown, 403 channel not in your mix, 502 console unreachable |
+| POST | `/api/mute` | `{ channelId, muted }` — send mute for the user's mix only |
+| POST | `/api/mix-master` | `{ level }` — aux master level for the user's mix |
+| POST | `/api/mix-master-mute` | `{ muted }` — aux master on/off |
+| POST | `/api/dca` | `{ dcaId, level }` — DCA group fader (scales the group on the main mix) |
+| POST | `/api/dca-mute` | `{ dcaId, muted }` — DCA group on/off |
+
+### REST — admin (`x-admin-token`)
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/admin/login` | `{ username?, password }` → `{ token, username }`; omitting `username` signs in as built-in `admin` |
+| POST | `/api/admin/logout` | invalidates the calling token |
+| GET | `/api/admin/users` | `{ users: [{username}], current }` — hashes never leave the server |
+| POST | `/api/admin/users` | create account (username 1–40 chars, no `/` or `\`, password ≥ 4); 409 if taken |
+| POST | `/api/admin/users/:username/password` | change a user's password |
+| POST | `/api/admin/users/:username/remove` | delete account + kill its sessions; built-in `admin` and yourself are protected |
+| POST | `/api/admin/password` | legacy change of the built-in `admin` password |
+| GET | `/api/admin/config` | `{ mixer, mixerStatus, channels[], returns[], dca[], mixes[], sessions{}, users[], currentUser, coverUrl }` |
+| POST | `/api/admin/cover` · `/api/admin/cover/reset` | upload base64 data URL / revert to default |
+| GET | `/api/admin/network-info` | `{ addresses[], port }` |
+| POST | `/api/admin/mixer` | `{ host?, port?, mode?, faderMinDb?, faderMaxDb? }` — triggers reconnect |
+| POST | `/api/admin/mixer/reconnect` | reconnect without changing settings |
+| POST | `/api/admin/mixes/:id` | `{ name?, visible?, channelIds? }` |
+| POST | `/api/admin/channels/count` | set channel count (1–40), re-syncs every mix's `channelIds` |
+| POST | `/api/admin/channels/:id` | rename a channel |
+| POST | `/api/admin/sync-names` | pull names from the console (one-shot); 409 if not connected |
+| POST | `/api/admin/sessions/remove` | `{ name }` — boot a user |
+| POST | `/api/admin/raw` | `{ command }` → `{ ok, reply }` raw RCP |
+
+### WebSocket — `GET /ws`
+Clients send `{ type: "subscribe", mixId }` to receive mix-scoped messages.
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `mixerStatus` | → clients | `{ connected, host?, port?, error?, mock? }`; sent immediately on connect, then on every change |
+| `sessionsChanged` | → clients | a user joined/left |
+| `sessionRemoved` | → clients | `{ name }` — admin booted that user |
+| `mixesChanged` | → clients | mix visibility/name changes |
+| `mixConfigUpdated` | → mix subscribers | `{ mixId, name, visible, channels[] }` |
+| `mixLevelUpdated` / `mixMuteUpdated` | → mix subscribers | another user (or the desk) moved a channel send |
+| `mixMasterUpdated` / `mixMasterMuteUpdated` | → mix subscribers | aux master changed |
+| `dcaLevelUpdated` / `dcaMuteUpdated` | → mix subscribers | DCA group changed |
+| `notify` | → clients | raw console `NOTIFY` line, forwarded verbatim |
+
+**Live mirroring.** Several people can share one aux mix: every successful write
+is broadcast back to that mix's subscribers, and the desk's own `NOTIFY` lines
+are parsed (`parseNotify()`) into the same messages — so a physical fader move or
+a scene recall updates every phone without a reload. Clients skip a strip they are
+actively dragging, and the desk never NOTIFYs the originating connection, so
+there is no echo loop. Fader sends are throttled to ~10/s with a trailing send and
+an immediate flush on release.
+
+### `data/config.json` schema
+```json
+{
+  "admin": {
+    "users": [{ "username": "admin", "passwordHash": "salt:scrypt-hash" }],
+    "passwordHash": "salt:scrypt-hash"
+  },
+  "mixer": { "host": "192.168.18.89", "port": 49280, "mode": "real", "faderMinDb": -60, "faderMaxDb": 10 },
+  "channels": [{ "id": "ch1", "index": 0, "name": "Kick" }],
+  "returns": [{ "id": "fx1", "kind": "fx", "index": 0, "name": "Fx 1" }],
+  "dca": [{ "id": "dca1", "index": 0, "name": "DCA 1" }],
+  "mixes": [{ "id": "mix1", "index": 0, "name": "PARKIR", "visible": true, "channelIds": ["ch1", "ch2"] }],
+  "sessions": {
+    "lowercase-name": { "name": "Original Case", "mixId": "mix1", "token": "uuid",
+                        "joinedAt": 1234567890, "lastSeen": 1234567890, "removed": false }
+  }
+}
+```
+
+`store.js` is the only reader/writer. It migrates old files on load (single-admin
+→ `users[]`, missing `dca`/`returns` arrays) and resets to `defaultConfig()` if the
+file is missing or corrupt. Defaults: 16 channels, 16 mixes (only mix1 visible),
+fader range −60…+10 dB, admin password `admin123`.
+
+---
+
+## 9. Security model
+
+- **Admin** — username + password, scrypt (`scryptSync`) with a random per-hash
+  salt, verified with `timingSafeEqual`. Multiple admin accounts are supported;
+  the built-in `admin` account cannot be deleted and you cannot delete the account
+  you are signed in with. Removing a user kills their live admin sessions.
+  Tokens are stored in `sessionStorage`, so they clear when the tab closes.
+- **Band member** — no password by design. A display name maps to a
+  `crypto.randomUUID()` token kept in that phone's `localStorage` (survives
+  reloads, not shared between devices). Sessions are soft: the admin can boot one
+  by name.
+- **Server-side authorisation** — `POST /api/fader`, `/api/mute`, `/api/dca` reject
+  with **403** if the channel/DCA is not part of the caller's assigned mix. The
+  browser is never trusted.
+- **Input handling** — `express.json({ limit: "12mb" })` (cover uploads), numeric
+  clamping of levels to the configured fader range, non-finite levels clamped on
+  the way out so `JSON.stringify` can't emit `null`, channel counts clamped to
+  1–40, admin username/password length checks.
+- **Network** — the console is never exposed to the internet; Cloudflare exposes
+  only HTTP/HTTPS, RCP rides Tailscale. `data/config.json` (password hashes,
+  tokens) and `data/cover.jpg` are git-ignored.
+- **Static assets** are served with `Cache-Control: no-store` plus a global
+  `{ cache: "no-store" }` on the client fetch helper, so admin changes are never
+  served stale.
+
+---
+
+## 10. Deployment
+
+### Phase 1 (current) — Ubuntu home server + Cloudflare Tunnel + Tailscale
+
+```
+Users (any browser)
+  → Cloudflare Tunnel (public HTTPS)
+  → Ubuntu home server  (Node.js ≥18, PM2 or systemd)
+  → Tailscale (private mesh VPN)
+  → Church Windows PC   (Tailscale subnet router — no app installed)
+  → Church LAN → Yamaha TF5 (RCP TCP 49280)
+```
+
+- The TF5 is never exposed to the internet; Tailscale carries the private TCP RCP
+  traffic, Cloudflare only HTTP/HTTPS.
+- PM2 is the recommended supervisor for a single-process Node app (`pm2 start
+  server/index.js --name stage-mix`, `pm2 startup`, `pm2 save`); systemd is
+  equally fine if the host is already systemd-managed.
+- No `.env` layer: `data/config.json` holds all settings including mixer
+  host/port, and the admin UI writes to it. The only environment variable used is
+  `PORT` (default 3000), plus `STAGEMIX_PORT` for the Windows launcher.
+- Cloudflare specifics: WS on `/ws` needs no special config; the 100 s idle
+  timeout is covered by the client's 2 s reconnect loop. Because the app doesn't
+  use `req.ip`/`req.protocol`, proxy headers need no handling.
+- Validation checklist: Ubuntu can reach the console over Tailscale
+  (`nc -zv <tf-ip> 49280`), several phones can move faders at once, the app
+  reconnects after a console restart, tunnel health checks pass.
+
+Local/on-site alternative: run it straight on the church laptop with
+`stagemix start` and hand out the LAN address shown in the **Share** tab.
+
+### Phase 2 (planned)
+Standby host on the church PC (Node + PM2), config sync (Syncthing/rsync/Git),
+manual failover by repointing the Cloudflare Tunnel, and health monitoring for the
+Node process, TF5 link, Tailscale, disk and CPU/RAM. Explicitly out of scope:
+active-active servers, multiple concurrent RCP connections, large refactors.
+
+`network_infrastructure.md` (now folded into this README) framed the guiding
+principle: reliability through simple, testable infrastructure.
+
+### Failure behaviour
+
+| Scenario | Behaviour | Recovery |
+|---|---|---|
+| TF console restarts | RCP socket closes, red banner to all clients | auto-reconnect with backoff when the desk returns |
+| App host restarts | everything stops | PM2/systemd autostart; Cloudflare + Tailscale reconnect |
+| Church PC restarts | Tailscale route drops → RCP closes | auto-reconnect once the route is back |
+| Tailscale outage | RCP socket drops, pending commands rejected | auto-reconnect; phones show stale faders until then |
+| Internet loss | tunnel drops; app + RCP keep running | tunnel reconnects; LAN users unaffected |
+| Cloudflare tunnel drops | external access lost | `cloudflared` reconnects automatically |
+
+There is no single point of failure that breaks things permanently: worst case is
+degraded mode (faders don't reach the desk, red banner shown).
+
+---
+
+## 11. Operations
+
+- **Health** — `GET /health` → `{ status: "ok", uptime, mixer: { connected, … } }`.
+  Used by the tray indicator and suitable for PM2/tunnel health checks.
+- **Logging** — one line per HTTP request (method, path, status, duration — no
+  tokens or bodies) plus `[RCP]` connect/disconnect/error lines, all to stdout;
+  the Windows launcher redirects to `logs\stagemix-out.log` / `-err.log`.
+- **Graceful shutdown** — `SIGTERM`/`SIGINT` are handled: the RCP socket is
+  closed, the HTTP server and WebSocket server are shut down.
+- **Crash safety** — `uncaughtException` / `unhandledRejection` handlers log and
+  exit cleanly instead of dying silently.
+- **Verification habit** — before a real rehearsal, use **Raw Console** to `get`
+  a send level, move that send on the desk, and `get` it again to confirm the
+  numbers line up.
+
+---
+
+## 12. Development constraints
+
+Preserve, extend, stabilise — smallest safe change wins.
+
+- Keep **exactly one** `RcpClient` instance; all browser requests multiplex
+  through it. `server/rcpClient.js` is the sole gateway to the console.
+- Do not break existing `/api/*` paths, methods or response shapes, the
+  WebSocket message names/payloads, or the `config.json` structure. Migrations
+  must stay backward compatible.
+- Keep the layout (`public/`, `server/`, `data/`, `scripts/`); `server/index.js`
+  is the entry point.
+- **Do not introduce** React/Vue/Angular/Svelte/Next.js, TypeScript, SQL,
+  MongoDB, Redis, Docker (for the app itself) or microservices.
+- Never crash on console disconnect; reconnect with backoff and notify clients.
+- Validate every control request server-side against the caller's mix.
+- Prefer deletion over addition; stdlib first; no unrequested abstractions.
+
+---
+
+## 13. Known limitations & roadmap
+
+**Working as intended**
+- Server-side channel-in-mix validation on fader/mute/DCA.
+- Graceful shutdown, global exception handlers, `/health`, request logging.
+- Live mirroring between users sharing a mix, and desk → app sync via `NOTIFY`.
+- Multiple admin accounts, admin-controlled channel order, custom landing cover.
+
+**Open items**
+1. **Three-tier connection state** — clients currently show only
+   connected/offline. Planned: green (server + TF), yellow (server up, TF down),
+   red (server unreachable).
+2. **Reconnect cap** — currently 15 s; the spec asks for 1s → 2s → 5s → 10s →
+   20s → 30s.
+3. **DCA group faders are API-only** — `/api/dca`, `/api/dca-mute` and the WebSocket
+   messages exist server-side, but no UI control is rendered in `public/` yet.
+4. **`mockRcpClient` startup race** — `_latency()` can throw if a request arrives
+   during the simulated 300 ms connect window.
+5. **No config backup on corruption** — a malformed `config.json` is silently
+   replaced by defaults (loses channels/mixes/sessions without warning).
+6. **No rate limiting** and no WebSocket ping/pong (idle-timeout survival relies
+   on the client's reconnect loop).
+7. **One console only** — `mixer` is a single object; two rooms would need a list.
+8. **Name sync is one-shot** — renames made on the desk mid-service aren't
+   mirrored; press *Pull names from console* again.
+
+**Deferred / future** — health monitoring, config synchronisation, automatic
+failover, dedicated Linux appliance image.
+
+---
+
+## 14. Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Phones can't open the page | Same Wi-Fi/LAN? Windows Firewall → allow Node.js on **Private** networks (the prompt appears on first `npm start`). Use the address from the **Share** tab |
+| Faders move but nothing changes on the desk | Red banner visible? Mixer Link status dot. Confirm mode is *Real TF console*, host/port correct, RCP enabled |
+| "Pull names" gives placeholder names | Still in **Simulated** mode — switch Mixer Link to *Real TF console* first |
+| Aux/channel names wrong | Channel count must match the desk before pulling names; a mix only receives names for channels the app knows exist |
+| Console link keeps dropping | Only one RCP client is allowed — close Companion/QLab/duplicate app instances; check the 5 s command timeout against console slowness |
+| Fader screen shows a channel at minimum | `-∞` dB is clamped to the configured `faderMinDb`; that's expected |
+| Fader view feels frozen on load | It fetches level+mute per channel **sequentially** by design (serial RCP). A genuinely unresponsive channel now triggers a clean reconnect instead of mis-mapping replies |
+| Need to see real console values | **Raw Console** tab, e.g. `get MIXER:Current/InCh/ToMix/Level 0 0` |
+
+---
+
+## 15. Changelog
+
+Consolidated from the former `AI_CHANGELOG.md` and dated change notes.
+
+**2026-09-13 — live desk → app sync.** Root cause of "some faders match the desk,
+others don't": the app only read values when the mixer screen opened and discarded
+the desk's `NOTIFY` lines. Added `parseNotify()` in `server/index.js`, converting
+`InCh`/`FxRtnCh` `ToMix/Level|On` and `Mix/Fader/Level|On` notifications into the
+existing live-update messages, scoped to the mix's subscribers. `-32768` maps to
+`faderMinDb`. Verified against a live TF5; no echo loop (the desk doesn't NOTIFY
+the originating connection). Additive, no API shape change.
+
+**2026-09-06 — five features.**
+*Multi-user admin accounts*: `admin.users[]` becomes the source of truth
+(`admin.passwordHash` kept as a legacy mirror), `_adminToken` → `_adminTokens` map,
+new users CRUD endpoints, login accepts `{ username, password }` (omitting it still
+signs in as built-in `admin`).
+*Login time in Active Users*: sessions record `joinedAt`, shown as local date/time.
+*Live mirroring*: fader/mute/master writes broadcast to the mix's subscribers; the
+client updates strips in place, skips the strip being dragged, and switches to a
+100 ms throttle with trailing send + flush on release.
+*Admin-controlled channel order*: `mix.channelIds` order is authoritative; the
+picker became an ordered list and the per-device drag-reorder (with its
+`sm_fader_order_*` localStorage) was removed.
+*Customizable landing cover*: full-screen cover redesign, admin upload/reset,
+stored at `data/cover.jpg`, served via `/cover` with cache-busting.
+
+**2026-08-30 — stability + fader UX.** `cache: "no-store"` on all client API
+calls (stale admin config reads); channel queries serialized instead of 32
+parallel requests ×2 (concurrent timeouts were killing the socket); per-command
+timeout 3 s → 5 s; `-Infinity` → `null` → `toFixed` crash fixed by clamping
+non-finite levels server-side and defending on the client; wider/taller fader
+strips with larger type; **aux master fader** added (`MIXER:Current/Mix/Fader/Level`
++ `/api/mix-master`, gold-themed); master fader pinned to the right while channel
+strips scroll; fader rack stretched to full viewport height; `stop.bat` created.
+
+**2026-08-02 — production readiness pass.** Fixed the critical authorization gap:
+`/api/fader` and `/api/mute` now verify the channel belongs to the caller's mix
+(403 otherwise). Subsequent items from that report were implemented too: graceful
+shutdown, uncaught-exception handling, `/health`, and HTTP request logging.
+Rejected as unnecessary: a `.env` layer, and logging frameworks/log rotation
+(PM2 handles it). Still open from that report: the 30 s reconnect cap, rate
+limiting, config backup on corruption, WS ping/pong.
+
+**Earlier — initial build.** Vanilla SPA, Express + `ws`, single RCP TCP client,
+mock mode, JSON store, admin/mix/channel configuration, raw console tab, share
+tab, multi-channel fetch fixes, channel count up to 40, aux-name command shape fix
+(two indices), live updates when the desk changes a mix's channel list.
+
+---
+
+## 16. Credits
+
+- RCP protocol documentation: <https://github.com/BrenekH/yamaha-rcp-docs>
+- Parameter shapes cross-checked with bitfocus/companion-module-yamaha-rcp
+  (`TF Parameters-1.txt`, captured from the console's `prminfo`).
+
+Built for a church band's in-ear/monitor workflow — keep it small, keep it
+boring, keep it working on a Sunday morning.
